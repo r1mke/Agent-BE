@@ -1,4 +1,5 @@
 ﻿using AiAgents.BeeHiveAgent.Application.Interfaces;
+using AiAgents.BeeHiveAgent.Domain.Entities;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -9,43 +10,75 @@ namespace AiAgents.BeeHiveAgent.Web.Controllers;
 public class AdminController : ControllerBase
 {
     private readonly IAppDbContext _db;
+    private readonly IReviewService _reviewService;
 
-    public AdminController(IAppDbContext db)
+    public AdminController(IAppDbContext db, IReviewService reviewService)
     {
         _db = db;
+        _reviewService = reviewService;
     }
 
 
     [HttpPost("trigger-retrain")]
     public async Task<IActionResult> TriggerRetrain()
     {
-        var settings = await _db.Settings.FirstOrDefaultAsync();
+        var result = await _reviewService.TriggerRetrainAsync();
+        if (!result.IsSuccess) return BadRequest(result.ErrorMessage);
+        return Ok(result.Data);
+    }
 
-        if (settings == null)
+    [HttpPost("prove-learning")]
+    public async Task<IActionResult> ProveLearning([FromServices] IBeeImageClassifier classifier, [FromServices] IModelTrainer trainer)
+    {
+        var testSample = await _db.ImageSamples.FirstOrDefaultAsync();
+        if (testSample == null) return BadRequest("Nema slika u bazi za testiranje.");
+
+        // 1. Predikcija prije učenja
+        var predictionBefore = await classifier.PredictAsync(testSample.ImagePath);
+
+        // Započinjemo transakciju kako bi baza ostala čista na kraju
+        using var transaction = await _db.Database.BeginTransactionAsync();
+
+        try
         {
-            return NotFound("Settings not found in database.");
+            // 2. Ubacujemo puno fake podataka da namjerno "iskrivimo" model
+            var fakeData = new List<HiveImageSample>();
+            for (int i = 0; i < 50; i++)
+            {
+                fakeData.Add(new HiveImageSample
+                {
+                    Id = Guid.NewGuid(),
+                    ImagePath = testSample.ImagePath,
+                    Label = "Pollen", // Namjerno forsiramo ovu labelu
+                    Status = Domain.Enums.SampleStatus.Reviewed
+                });
+            }
+            _db.ImageSamples.AddRange(fakeData);
+            await _db.SaveChangesAsync();
+
+            // 3. Pokrećemo učenje
+            var allGold = await _db.ImageSamples.Where(s => s.Status == Domain.Enums.SampleStatus.Reviewed).ToListAsync();
+            trainer.TrainModel(allGold);
+
+            // 4. Predikcija poslije učenja (novi model)
+            var predictionAfter = await classifier.PredictAsync(testSample.ImagePath);
+
+            // 5. Očisti nered iz baze
+            await transaction.RollbackAsync();
+
+            return Ok(new
+            {
+                Message = "Proof of learning završen. Baza je netaknuta.",
+                Image = testSample.ImagePath,
+                ScoreBefore = predictionBefore,
+                ScoreAfter = predictionAfter
+            });
         }
-
-
-        var goldCount = await _db.ImageSamples
-            .CountAsync(s => s.Status == Domain.Enums.SampleStatus.Reviewed);
-
-        if (goldCount == 0)
+        catch (Exception ex)
         {
-            return BadRequest("No gold samples in database. Upload and review some images first.");
+            await transaction.RollbackAsync();
+            return StatusCode(500, $"Greška tokom dokazivanja: {ex.Message}");
         }
-
-
-        settings.NewGoldSinceLastTrain = goldCount;
-        await _db.SaveChangesAsync(CancellationToken.None);
-
-        return Ok(new
-        {
-            Message = "Retrain triggered!",
-            GoldSamples = goldCount,
-            Threshold = settings.RetrainGoldThreshold,
-            Note = "RetrainWorker will pick this up within 10 seconds."
-        });
     }
 
 

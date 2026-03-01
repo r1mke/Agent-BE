@@ -1,5 +1,6 @@
 ﻿using AiAgents.BeeHiveAgent.Application.Interfaces;
 using AiAgents.BeeHiveAgent.Domain.Entities;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.ML;
 
 namespace AiAgents.BeeHiveAgent.Infrastructure.ML;
@@ -7,19 +8,18 @@ namespace AiAgents.BeeHiveAgent.Infrastructure.ML;
 public class TrainingService : IModelTrainer
 {
     private readonly string _modelsFolder;
-    private readonly string _modelPath;
     private readonly MLContext _mlContext;
+    private readonly IServiceScopeFactory _scopeFactory;
 
-
+    // Zadržavamo event da bismo javili Classifier-u da reload-a model
     public static event Action? OnModelTrained;
 
-    public TrainingService()
+    public TrainingService(IServiceScopeFactory scopeFactory)
     {
         _mlContext = new MLContext(seed: 42);
-
+        _scopeFactory = scopeFactory;
 
         _modelsFolder = Path.Combine(Directory.GetCurrentDirectory(), "MLModels");
-        _modelPath = Path.Combine(_modelsFolder, "bee_model.zip");
 
         if (!Directory.Exists(_modelsFolder))
             Directory.CreateDirectory(_modelsFolder);
@@ -27,23 +27,22 @@ public class TrainingService : IModelTrainer
 
     public bool ModelExists()
     {
-        return File.Exists(_modelPath);
+        // Provjerava da li postoji barem jedan model u bazi
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<IAppDbContext>();
+        return db.Settings.Any(s => s.ActiveModelVersionId != null);
     }
 
     public string TrainModel(List<HiveImageSample> goldSamples)
     {
         Console.WriteLine("═══════════════════════════════════════════════════");
-        Console.WriteLine("🐝 POKREĆEM TRENING ML MODELA");
+        Console.WriteLine("🐝 POKREĆEM TRENING ML MODELA (PRO VERZIJA)");
         Console.WriteLine("═══════════════════════════════════════════════════");
-
 
         var countPollen = goldSamples.Count(s => s.Label == "Pollen");
         var countNoPollen = goldSamples.Count(s => s.Label == "NoPollen");
 
-        Console.WriteLine($"📊 Dataset statistika:");
-        Console.WriteLine($"   - Pollen slike: {countPollen}");
-        Console.WriteLine($"   - NoPollen slike: {countNoPollen}");
-        Console.WriteLine($"   - Ukupno: {goldSamples.Count}");
+        Console.WriteLine($"📊 Dataset statistika: Pollen ({countPollen}), NoPollen ({countNoPollen})");
 
         if (countPollen == 0 || countNoPollen == 0)
         {
@@ -51,16 +50,12 @@ public class TrainingService : IModelTrainer
             return "SKIPPED_BAD_DATA";
         }
 
-
         var validSamples = goldSamples.Where(s => File.Exists(s.ImagePath)).ToList();
-        Console.WriteLine($"✅ Validnih slika (postoje na disku): {validSamples.Count}");
-
         if (validSamples.Count < 10)
         {
-            Console.WriteLine("❌ GREŠKA: Premalo validnih slika za trening!");
+            Console.WriteLine("❌ GREŠKA: Premalo validnih slika za trening (min. 10)!");
             return "SKIPPED_BAD_DATA";
         }
-
 
         var trainData = validSamples.Select(s => new ModelInput
         {
@@ -69,9 +64,6 @@ public class TrainingService : IModelTrainer
         }).ToList();
 
         var trainingDataView = _mlContext.Data.LoadFromEnumerable(trainData);
-
-
-        Console.WriteLine("🔧 Kreiram ML pipeline...");
 
         var pipeline = _mlContext.Transforms.Conversion.MapValueToKey(
                 inputColumnName: "Label",
@@ -87,10 +79,7 @@ public class TrainingService : IModelTrainer
                 outputColumnName: "PredictedLabel",
                 inputColumnName: "PredictedLabel"));
 
-
         Console.WriteLine("💪 Započinjem trening modela (ovo može potrajati)...");
-        var startTime = DateTime.Now;
-
         ITransformer trainedModel;
         try
         {
@@ -102,31 +91,66 @@ public class TrainingService : IModelTrainer
             return "TRAINING_FAILED";
         }
 
-        var duration = DateTime.Now - startTime;
-        Console.WriteLine($"⏱️ Trening završen za: {duration.TotalSeconds:F1} sekundi");
+        // --- MLOps EVALUACIJA MODELA ---
+        Console.WriteLine("📈 Evaluacija modela...");
+        var predictions = trainedModel.Transform(trainingDataView);
+        var metrics = _mlContext.MulticlassClassification.Evaluate(predictions, labelColumnName: "LabelKey");
+        double accuracy = metrics.MicroAccuracy;
+        Console.WriteLine($"📊 Preciznost novog modela (MicroAccuracy): {accuracy:P2}");
 
-
-        Console.WriteLine($"💾 Spašavam model na: {_modelPath}");
+        // --- VERZIONIRANJE I SPAŠAVANJE ---
+        var newVersionId = Guid.NewGuid();
+        var modelFileName = $"bee_model_{newVersionId}.zip";
+        var newModelPath = Path.Combine(_modelsFolder, modelFileName);
 
         try
         {
-            _mlContext.Model.Save(trainedModel, trainingDataView.Schema, _modelPath);
-            Console.WriteLine("✅ Model uspješno spašen!");
+            _mlContext.Model.Save(trainedModel, trainingDataView.Schema, newModelPath);
+            Console.WriteLine($"✅ Model uspješno spašen na: {newModelPath}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"❌ Greška pri spašavanju: {ex.Message}");
+            Console.WriteLine($"❌ Greška pri spašavanju na disk: {ex.Message}");
             return "SAVE_FAILED";
         }
 
+        // --- UPIS U BAZU ---
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<IAppDbContext>();
+
+            var novaVerzija = new ModelVersion
+            {
+                Id = newVersionId,
+                CreatedAt = DateTime.UtcNow,
+                FilePath = newModelPath,
+                Accuracy = accuracy
+            };
+            db.ModelVersions.Add(novaVerzija);
+
+            var settings = db.Settings.FirstOrDefault();
+            if (settings != null)
+            {
+                var aktivniModel = settings.ActiveModelVersionId.HasValue ? db.ModelVersions.Find(settings.ActiveModelVersionId.Value) : null;
+
+                // Promijeni aktivni model samo ako je novi bolji ili ako aktivni ne postoji
+                if (aktivniModel == null || novaVerzija.Accuracy >= aktivniModel.Accuracy)
+                {
+                    settings.ActiveModelVersionId = novaVerzija.Id;
+                    Console.WriteLine("🏆 NOVI MODEL JE POSTAO AKTIVAN (Bolji ili prvi model)!");
+                }
+                else
+                {
+                    Console.WriteLine("⚠️ Novi model ima lošiju preciznost od postojećeg. Sačuvan je u bazu, ali nije aktiviran.");
+                }
+
+                settings.NewGoldSinceLastTrain = 0; // Resetujemo counter
+            }
+            db.SaveChangesAsync().Wait();
+        }
 
         OnModelTrained?.Invoke();
 
-        var version = $"v{DateTime.Now:yyyyMMdd_HHmmss}";
-        Console.WriteLine("═══════════════════════════════════════════════════");
-        Console.WriteLine($"🎉 TRENING KOMPLETIRAN! Nova verzija: {version}");
-        Console.WriteLine("═══════════════════════════════════════════════════");
-
-        return version;
+        return newVersionId.ToString();
     }
 }

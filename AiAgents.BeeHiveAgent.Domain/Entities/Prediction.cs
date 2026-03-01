@@ -7,7 +7,7 @@ public class Prediction : IAction
 {
     public Guid Id { get; set; }
     public Guid SampleId { get; set; }
-    public Guid ModelVersionId { get; set; }
+    public string ModelVersion { get; set; } = string.Empty;
 
 
     public float Score { get; set; }

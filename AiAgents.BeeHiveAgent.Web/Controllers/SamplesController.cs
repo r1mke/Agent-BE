@@ -163,66 +163,19 @@ public class SamplesController : ControllerBase
 
 
     [HttpPost("review")]
-    public async Task<IActionResult> ReviewSample([FromBody] ReviewRequestDto request)
+    public async Task<IActionResult> ReviewSample([FromBody] ReviewRequestDto request, [FromServices] IReviewService reviewService)
     {
-        var sample = await _db.ImageSamples.FindAsync(request.SampleId);
-
-        if (sample == null)
-            return NotFound("Sample ID not found.");
-
-        sample.Label = request.IsPollen ? "Pollen" : "NoPollen";
-        sample.Status = SampleStatus.Reviewed;
-
-        var settings = await _db.Settings.FirstOrDefaultAsync();
-        if (settings != null)
-        {
-            settings.NewGoldSinceLastTrain++;
-        }
-
-        await _db.SaveChangesAsync(CancellationToken.None);
-
-        return Ok(new
-        {
-            Message = "Review saved! This image is now Gold Data.",
-            SampleId = sample.Id,
-            AssignedLabel = sample.Label,
-            ProgressToNextRetrain = $"{settings?.NewGoldSinceLastTrain}/{settings?.RetrainGoldThreshold}"
-        });
+        var result = await reviewService.SubmitReviewAsync(request);
+        if (!result.IsSuccess) return NotFound(result.ErrorMessage);
+        return Ok(result.Data);
     }
 
-
     [HttpPost("review-bulk")]
-    public async Task<IActionResult> ReviewBulk([FromBody] List<ReviewRequestDto> requests)
+    public async Task<IActionResult> ReviewBulk([FromBody] List<ReviewRequestDto> requests, [FromServices] IReviewService reviewService)
     {
-        if (requests == null || requests.Count == 0)
-            return BadRequest("No reviews provided.");
-
-        var settings = await _db.Settings.FirstOrDefaultAsync();
-        int reviewedCount = 0;
-
-        foreach (var request in requests)
-        {
-            var sample = await _db.ImageSamples.FindAsync(request.SampleId);
-            if (sample == null) continue;
-
-            sample.Label = request.IsPollen ? "Pollen" : "NoPollen";
-            sample.Status = SampleStatus.Reviewed;
-
-            if (settings != null)
-            {
-                settings.NewGoldSinceLastTrain++;
-            }
-
-            reviewedCount++;
-        }
-
-        await _db.SaveChangesAsync(CancellationToken.None);
-
-        return Ok(new
-        {
-            Message = $"Reviewed {reviewedCount} samples!",
-            ProgressToNextRetrain = $"{settings?.NewGoldSinceLastTrain}/{settings?.RetrainGoldThreshold}"
-        });
+        var result = await reviewService.SubmitBulkReviewAsync(requests);
+        if (!result.IsSuccess) return BadRequest(result.ErrorMessage);
+        return Ok(result.Data);
     }
 }
 

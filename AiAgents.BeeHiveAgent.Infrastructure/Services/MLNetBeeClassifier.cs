@@ -1,26 +1,26 @@
 ﻿using AiAgents.BeeHiveAgent.Application.Interfaces;
 using AiAgents.BeeHiveAgent.Infrastructure.ML;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.ML;
 
 namespace AiAgents.BeeHiveAgent.Infrastructure.Services;
 
-
 public class MLNetBeeClassifier : IBeeImageClassifier, IDisposable
 {
     private readonly MLContext _mlContext;
-    private readonly string _modelPath;
+    private readonly IServiceScopeFactory _scopeFactory;
     private ITransformer? _trainedModel;
     private PredictionEngine<ModelInput, ModelOutput>? _predictionEngine;
     private readonly object _lock = new object();
     private bool _disposed = false;
+    private Guid? _currentLoadedVersionId = null;
 
-    public MLNetBeeClassifier()
+    public MLNetBeeClassifier(IServiceScopeFactory scopeFactory)
     {
         _mlContext = new MLContext();
-        _modelPath = Path.Combine(Directory.GetCurrentDirectory(), "MLModels", "bee_model.zip");
+        _scopeFactory = scopeFactory;
 
         TrainingService.OnModelTrained += ReloadModel;
-
 
         LoadModel();
     }
@@ -29,21 +29,42 @@ public class MLNetBeeClassifier : IBeeImageClassifier, IDisposable
     {
         lock (_lock)
         {
-            if (!File.Exists(_modelPath))
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<IAppDbContext>();
+
+            var settings = db.Settings.FirstOrDefault();
+
+            if (settings == null || settings.ActiveModelVersionId == null)
             {
-                Console.WriteLine($"⚠️ MLNetBeeClassifier: Model nije nađen na {_modelPath}");
-                Console.WriteLine("   -> Čekam da RetrainAgent završi prvi trening...");
+                Console.WriteLine($"⚠️ MLNetBeeClassifier: Nema aktivne verzije modela u bazi.");
+                Console.WriteLine("   -> Čekam da RetrainWorker završi prvi trening...");
+                _predictionEngine = null;
+                return;
+            }
+
+            // Ako je već učitan trenutno aktivni model, ne moramo ga ponovo učitavati
+            if (_currentLoadedVersionId == settings.ActiveModelVersionId)
+            {
+                return;
+            }
+
+            var activeModel = db.ModelVersions.Find(settings.ActiveModelVersionId.Value);
+
+            if (activeModel == null || !File.Exists(activeModel.FilePath))
+            {
+                Console.WriteLine($"❌ MLNetBeeClassifier: Aktivan model (ID: {settings.ActiveModelVersionId}) ne postoji na disku!");
                 _predictionEngine = null;
                 return;
             }
 
             try
             {
-                Console.WriteLine($"📂 MLNetBeeClassifier: Učitavam model iz {_modelPath}");
+                Console.WriteLine($"📂 MLNetBeeClassifier: Učitavam verziju {activeModel.Id} iz {activeModel.FilePath}");
 
                 DataViewSchema modelSchema;
-                _trainedModel = _mlContext.Model.Load(_modelPath, out modelSchema);
+                _trainedModel = _mlContext.Model.Load(activeModel.FilePath, out modelSchema);
                 _predictionEngine = _mlContext.Model.CreatePredictionEngine<ModelInput, ModelOutput>(_trainedModel);
+                _currentLoadedVersionId = activeModel.Id;
 
                 Console.WriteLine("✅ MLNetBeeClassifier: Model uspješno učitan i spreman za predikcije!");
             }
@@ -55,10 +76,9 @@ public class MLNetBeeClassifier : IBeeImageClassifier, IDisposable
         }
     }
 
-
     private void ReloadModel()
     {
-        Console.WriteLine("🔄 MLNetBeeClassifier: Primljena obavijest o novom modelu, reload u toku...");
+        Console.WriteLine("🔄 MLNetBeeClassifier: Primljena obavijest o novom modelu, provjeravam aktivnu verziju...");
         LoadModel();
     }
 
@@ -66,24 +86,17 @@ public class MLNetBeeClassifier : IBeeImageClassifier, IDisposable
     {
         var result = new Dictionary<string, float>();
 
-
         if (_predictionEngine == null)
         {
-
-            LoadModel();
+            LoadModel(); // Pokušaj opet učitati
 
             if (_predictionEngine == null)
             {
-                Console.WriteLine($"⚠️ PREDIKCIJA PRESKOČENA: Model još nije istreniran!");
-                Console.WriteLine($"   -> Slika: {Path.GetFileName(imagePath)}");
-                Console.WriteLine($"   -> Čekam da se nakupi dovoljno gold podataka za trening...");
-
-
+                Console.WriteLine($"⚠️ PREDIKCIJA PRESKOČENA: Aktivni model nije pronađen!");
                 result.Add("Unknown", 0.0f);
                 return Task.FromResult(result);
             }
         }
-
 
         if (!File.Exists(imagePath))
         {
@@ -91,7 +104,6 @@ public class MLNetBeeClassifier : IBeeImageClassifier, IDisposable
             result.Add("Error_FileNotFound", 0.0f);
             return Task.FromResult(result);
         }
-
 
         try
         {
@@ -103,7 +115,6 @@ public class MLNetBeeClassifier : IBeeImageClassifier, IDisposable
                 prediction = _predictionEngine.Predict(input);
             }
 
-
             if (prediction.Score != null && prediction.Score.Length > 0)
             {
                 float maxScore = prediction.Score.Max();
@@ -111,15 +122,10 @@ public class MLNetBeeClassifier : IBeeImageClassifier, IDisposable
 
                 result.Add(predictedLabel, maxScore);
 
-
-                Console.WriteLine($"🧠 PREDIKCIJA: {Path.GetFileName(imagePath)}");
-                Console.WriteLine($"   -> Label: {predictedLabel}");
-                Console.WriteLine($"   -> Confidence: {maxScore:P1}");
-                Console.WriteLine($"   -> All scores: [{string.Join(", ", prediction.Score.Select(s => s.ToString("F3")))}]");
+                Console.WriteLine($"🧠 PREDIKCIJA: {Path.GetFileName(imagePath)} -> Label: {predictedLabel} (Confidence: {maxScore:P1})");
             }
             else
             {
-                Console.WriteLine($"⚠️ PREDIKCIJA: Prazan rezultat za {Path.GetFileName(imagePath)}");
                 result.Add("Unknown", 0.0f);
             }
         }

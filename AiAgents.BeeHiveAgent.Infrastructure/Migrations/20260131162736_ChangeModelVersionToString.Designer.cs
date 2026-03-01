@@ -4,6 +4,7 @@ using AiAgents.BeeHiveAgent.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AiAgents.BeeHiveAgent.Infrastructure.Migrations
 {
     [DbContext(typeof(BeeHiveAgentDbContext))]
-    partial class BeeHiveAgentDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260131162736_ChangeModelVersionToString")]
+    partial class ChangeModelVersionToString
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

@@ -2,6 +2,6 @@
 
 public interface IBeeImageClassifier
 {
-    // Vraća dictionary: "Pollen" -> 0.95, "NoPollen" -> 0.05
+    string ModelVersion { get; }
     Task<Dictionary<string, float>> PredictAsync(string imagePath);
 }

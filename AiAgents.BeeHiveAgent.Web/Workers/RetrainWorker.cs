@@ -46,7 +46,7 @@ public class RetrainWorker : BackgroundService
                         _logger.LogInformation("═══════════════════════════════════════════════════");
 
 
-                        await Task.Delay(60000, stoppingToken); // 1 minuta
+                        await Task.Delay(60000, stoppingToken);
                     }
                     else
                     {

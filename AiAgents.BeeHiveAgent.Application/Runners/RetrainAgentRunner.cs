@@ -6,9 +6,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AiAgents.BeeHiveAgent.Application.Runners;
 
-
 public record RetrainResult(string NewModelVersion, int TrainingCount) : IResult;
-
 
 public class RetrainAgentRunner : SoftwareAgent<SystemSettings, Prediction, RetrainResult>
 {
@@ -25,6 +23,7 @@ public class RetrainAgentRunner : SoftwareAgent<SystemSettings, Prediction, Retr
     {
 
         var settings = await _db.Settings.FirstOrDefaultAsync(ct);
+
         if (settings == null || !settings.IsRetrainEnabled)
         {
             return null;
@@ -33,11 +32,10 @@ public class RetrainAgentRunner : SoftwareAgent<SystemSettings, Prediction, Retr
 
         if (settings.NewGoldSinceLastTrain < settings.RetrainGoldThreshold)
         {
-
             return null;
         }
 
-        Console.WriteLine($"🎓 RETRAIN AGENT: Pokrećem trening! Gold podataka: {settings.NewGoldSinceLastTrain}");
+        Console.WriteLine($"🎓 RETRAIN AGENT: Pokrećem trening! Novih gold podataka: {settings.NewGoldSinceLastTrain}");
 
 
         var goldSamples = await _db.ImageSamples
@@ -54,18 +52,19 @@ public class RetrainAgentRunner : SoftwareAgent<SystemSettings, Prediction, Retr
         var newModelVersion = _trainer.TrainModel(goldSamples);
 
 
-        if (newModelVersion == "SKIPPED_BAD_DATA")
+        if (newModelVersion == "SKIPPED_BAD_DATA" || newModelVersion == "TRAINING_FAILED")
         {
-            Console.WriteLine("⚠️ RETRAIN AGENT: Trening preskočen - nedostaje jedna od klasa!");
+            Console.WriteLine($"⚠️ RETRAIN AGENT: Trening neuspješan ({newModelVersion}). Čekam više podataka.");
             return null;
         }
 
 
         settings.NewGoldSinceLastTrain = 0;
 
+
         await _db.SaveChangesAsync(ct);
 
-        Console.WriteLine($"✅ RETRAIN AGENT: Trening završen! Nova verzija: {newModelVersion}");
+        Console.WriteLine($"✅ RETRAIN AGENT: Trening završen! Nova aktivna verzija: {newModelVersion}");
 
         return new RetrainResult(newModelVersion, goldSamples.Count);
     }

@@ -41,7 +41,7 @@ builder.Services.AddSingleton<IModelTrainer>(provider =>
 builder.Services.AddSingleton<ScoringPolicy>();
 builder.Services.AddScoped<ScoringAgentRunner>();
 builder.Services.AddScoped<RetrainAgentRunner>();
-
+builder.Services.AddScoped<IReviewService, ReviewService>();
 
 builder.Services.AddTransient<DatabaseSeeder>();
 
